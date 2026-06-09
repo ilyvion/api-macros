@@ -119,6 +119,18 @@ pub fn api_endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `"GET"` + `"users/profile"` → `"GetUsersProfile"`
 /// - `"DELETE"` + `"user/webauthn/credentials/{id}"` → `"DeleteUserWebauthnCredentialsId"`
 /// - `"POST"` + `"auth/reset-password/complete"` → `"PostAuthResetPasswordComplete"`
+/// Strip `depth` leading path segments to produce an actix-web route path.
+///
+/// A trailing slash is preserved: `"itemdata/"` with depth 1 yields `"/"`, not `""`.
+fn route_path_after_depth(path: &str, depth: usize) -> String {
+    let joined = path.split('/').skip(depth).collect::<Vec<_>>().join("/");
+    if joined.is_empty() && path.ends_with('/') {
+        "/".to_string()
+    } else {
+        joined
+    }
+}
+
 fn ts_name_from_method_and_path(method: &str, path: &str) -> String {
     let method_part = method.to_pascal_case();
     let path_part: String = path
@@ -171,11 +183,7 @@ fn expand(args: &EndpointArgs, func: &ItemFn) -> syn::Result<proc_macro2::TokenS
         .map_err(|e| syn::Error::new(e.span(), format!("#[api_endpoint]: {e}")))?
         .unwrap_or(config.depth_default);
 
-    let route_path: String = path_str
-        .split('/')
-        .skip(depth)
-        .collect::<Vec<_>>()
-        .join("/");
+    let route_path = route_path_after_depth(&path_str, depth);
 
     // Validate: depth must leave at least one segment (or an empty string for the scope root).
     let segment_count = path_str.split('/').count();
@@ -372,6 +380,33 @@ mod tests {
             ts_name_from_method_and_path("GET", "users/recentItems"),
             "GetUsersRecentItems"
         );
+    }
+
+    #[test]
+    fn route_path_trailing_slash_becomes_slash() {
+        // "itemdata/" with depth 1 must yield "/" not "".
+        assert_eq!(route_path_after_depth("itemdata/", 1), "/");
+    }
+
+    #[test]
+    fn route_path_multi_segment_trailing_slash_preserved() {
+        assert_eq!(route_path_after_depth("api/items/", 1), "items/");
+    }
+
+    #[test]
+    fn route_path_no_trailing_slash() {
+        assert_eq!(route_path_after_depth("api/items", 1), "items");
+    }
+
+    #[test]
+    fn route_path_single_segment_no_trailing_slash_yields_empty() {
+        // "itemdata" with depth 1 → "" (scope root without trailing slash).
+        assert_eq!(route_path_after_depth("itemdata", 1), "");
+    }
+
+    #[test]
+    fn route_path_depth_zero() {
+        assert_eq!(route_path_after_depth("items/", 0), "items/");
     }
 
     #[test]
