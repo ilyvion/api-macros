@@ -1,6 +1,6 @@
 /// The macro must emit a compile error when the return type is not one of the
-/// recognised wrappers (`JsonApiResult`, `CustomizedJsonApiResult`, the legacy
-/// `web::Json<ApiResult<T>>`, or `Either<…>`).
+/// recognised wrappers (`Json<ApiResult<T>>`, `CustomizeResponder<Json<ApiResult<T>>>`,
+/// or `Either<…>`).
 use api_macros::api_endpoint;
 
 // A local `Result` alias with a single generic, as our actix handlers use.

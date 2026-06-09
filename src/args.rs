@@ -10,7 +10,7 @@ use syn::{
 pub(crate) struct EndpointArgs {
     /// HTTP method string, e.g. `"GET"`.
     pub(crate) method: LitStr,
-    /// URL path relative to `/api/`, e.g. `"measurement/trends"`.
+    /// URL path relative to `/api/`, e.g. `"users/profile"`.
     pub(crate) path: LitStr,
     /// Optional override for the generated TypeScript name (`PascalCase`).
     /// Defaults to the name derived from `method` + `path` (e.g. `"GET"` + `"foo/bar"` →
@@ -55,7 +55,10 @@ impl Parse for EndpointArgs {
         }
 
         let method = method.ok_or_else(|| {
-            syn::Error::new(Span::call_site(), "api_endpoint requires `method = \"...\"`")
+            syn::Error::new(
+                Span::call_site(),
+                "api_endpoint requires `method = \"...\"`",
+            )
         })?;
         let path = path.ok_or_else(|| {
             syn::Error::new(Span::call_site(), "api_endpoint requires `path = \"...\"`")

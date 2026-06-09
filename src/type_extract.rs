@@ -8,9 +8,14 @@
 //!
 //! # Return-type roles
 //! The outer return type must match one of:
-//! - `Result<JsonApiResult<T>>`               i.e. `Result<web::Json<ApiResult<T>>>`
-//! - `Result<CustomizedJsonApiResult<T>>`
-//! - `Result<Either<JsonApiResult<A>, CustomizedJsonApiResult<B>>>` → response is `A | B`
+//! - `Result<Json<{result_type}<T>>>` — standard JSON response
+//! - `Result<CustomizeResponder<Json<{result_type}<T>>>>` — customized JSON response
+//! - `Result<Either<L, R>>` where `L` and `R` are either of the above → response is `L_T | R_T`
+//!
+//! Where `result_type` is controlled by the `APIM_RESULT_TYPE` environment variable
+//! (default: `ApiResult`). If `APIM_JSON_API_RESULT_ALIAS` or
+//! `APIM_CUSTOMIZERESPONDER_JSON_API_RESULT_ALIAS` are set, those names are also accepted
+//! as single-generic-argument aliases for the respective canonical forms.
 
 use proc_macro2::Span;
 use syn::{
@@ -39,12 +44,24 @@ pub(crate) struct ExtractedTypes {
     pub(crate) response: ExtractedRole,
 }
 
+/// Configuration for type extraction, derived from environment variables.
+pub(crate) struct ExtractConfig<'a> {
+    /// Name of the result wrapper type (from `APIM_RESULT_TYPE`), e.g. `"ApiResult"`.
+    pub(crate) result_type: &'a str,
+    /// Optional alias accepted in place of `Json<result_type<T>>`
+    /// (from `APIM_JSON_API_RESULT_ALIAS`).
+    pub(crate) json_alias: Option<&'a str>,
+    /// Optional alias accepted in place of `CustomizeResponder<Json<result_type<T>>>`
+    /// (from `APIM_CUSTOMIZERESPONDER_JSON_API_RESULT_ALIAS`).
+    pub(crate) customized_alias: Option<&'a str>,
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 /// Extract all typed roles from `sig`.
-pub(crate) fn extract_types(sig: &Signature) -> Result<ExtractedTypes> {
+pub(crate) fn extract_types(sig: &Signature, config: &ExtractConfig<'_>) -> Result<ExtractedTypes> {
     let mut query: Option<Box<Type>> = None;
     let mut body: Option<Box<Type>> = None;
     let mut path_params: Option<Box<Type>> = None;
@@ -64,7 +81,7 @@ pub(crate) fn extract_types(sig: &Signature) -> Result<ExtractedTypes> {
         // web::Data<T>, HttpRequest, etc. — ignored
     }
 
-    let response = extract_response_type(sig)?;
+    let response = extract_response_type(sig, config)?;
 
     Ok(ExtractedTypes {
         query,
@@ -92,7 +109,7 @@ fn try_extract_web_wrapper(ty: &Type, wrapper: &str) -> Option<Box<Type>> {
 // Return-type extraction
 // ---------------------------------------------------------------------------
 
-fn extract_response_type(sig: &Signature) -> Result<ExtractedRole> {
+fn extract_response_type(sig: &Signature, config: &ExtractConfig<'_>) -> Result<ExtractedRole> {
     let ReturnType::Type(_, ret_ty) = &sig.output else {
         return Err(syn::Error::new(
             sig.fn_token.span,
@@ -109,21 +126,31 @@ fn extract_response_type(sig: &Signature) -> Result<ExtractedRole> {
     })?;
 
     // Try each supported wrapper
-    if let Some(t) = try_peel_json_api_result(inner) {
+    if let Some(t) = try_peel_json_result(inner, config) {
         return Ok(ExtractedRole::Single(t));
     }
-    if let Some(t) = try_peel_customized_json_api_result(inner) {
+    if let Some(t) = try_peel_customized_result(inner, config) {
         return Ok(ExtractedRole::Single(t));
     }
-    if let Some((a, b)) = try_peel_either(inner) {
+    if let Some((a, b)) = try_peel_either(inner, config) {
         return Ok(ExtractedRole::Union(a, b));
     }
 
+    let rt = config.result_type;
+    let json_alias_note = config
+        .json_alias
+        .map_or(String::new(), |a| format!(", `{a}<T>`"));
+    let cust_alias_note = config
+        .customized_alias
+        .map_or(String::new(), |a| format!(", `{a}<T>`"));
     Err(syn::Error::new_spanned(
         inner,
-        "#[api_endpoint]: unrecognised return type; expected \
-         `JsonApiResult<T>`, `CustomizedJsonApiResult<T>`, or \
-         `Either<JsonApiResult<A>, CustomizedJsonApiResult<B>>`",
+        format!(
+            "#[api_endpoint]: unrecognised return type; expected \
+             `Json<{rt}<T>>`{json_alias_note}, \
+             `CustomizeResponder<Json<{rt}<T>>>`{cust_alias_note}, \
+             or `Either<L, R>` where L and R are either of the above"
+        ),
     ))
 }
 
@@ -137,28 +164,60 @@ fn peel_result(ty: &Type) -> Option<&Type> {
     single_generic_arg_ref(&seg.arguments)
 }
 
-/// Peel `JsonApiResult<T>` → `T`.
-fn try_peel_json_api_result(ty: &Type) -> Option<Box<Type>> {
+/// Match a single-arg wrapper by exact name: `{name}<T>` → `T`.
+fn try_peel_by_name(ty: &Type, name: &str) -> Option<Box<Type>> {
     let path = type_to_path(ty)?;
     let seg = last_segment(path)?;
-    if seg.ident != "JsonApiResult" {
+    if seg.ident != name {
         return None;
     }
     single_generic_arg(&seg.arguments)
 }
 
-/// Peel `CustomizedJsonApiResult<T>` → `T`.
-fn try_peel_customized_json_api_result(ty: &Type) -> Option<Box<Type>> {
+/// Peel the canonical `Json<{result_type}<T>>` form → `T`.
+fn try_peel_json_result_canonical(ty: &Type, result_type: &str) -> Option<Box<Type>> {
     let path = type_to_path(ty)?;
     let seg = last_segment(path)?;
-    if seg.ident != "CustomizedJsonApiResult" {
+    if seg.ident != "Json" {
         return None;
     }
-    single_generic_arg(&seg.arguments)
+    let inner = single_generic_arg_ref(&seg.arguments)?;
+    let inner_path = type_to_path(inner)?;
+    let inner_seg = last_segment(inner_path)?;
+    if inner_seg.ident != result_type {
+        return None;
+    }
+    single_generic_arg(&inner_seg.arguments)
 }
 
-/// Peel `Either<JsonApiResult<A>, CustomizedJsonApiResult<B>>` → `(A, B)`.
-fn try_peel_either(ty: &Type) -> Option<(Box<Type>, Box<Type>)> {
+/// Peel `Json<{result_type}<T>>` → `T`, or the configured alias if it matches.
+fn try_peel_json_result(ty: &Type, config: &ExtractConfig<'_>) -> Option<Box<Type>> {
+    if let Some(alias) = config.json_alias
+        && let Some(t) = try_peel_by_name(ty, alias)
+    {
+        return Some(t);
+    }
+    try_peel_json_result_canonical(ty, config.result_type)
+}
+
+/// Peel `CustomizeResponder<Json<{result_type}<T>>>` → `T`, or the configured alias if it matches.
+fn try_peel_customized_result(ty: &Type, config: &ExtractConfig<'_>) -> Option<Box<Type>> {
+    if let Some(alias) = config.customized_alias
+        && let Some(t) = try_peel_by_name(ty, alias)
+    {
+        return Some(t);
+    }
+    let path = type_to_path(ty)?;
+    let seg = last_segment(path)?;
+    if seg.ident != "CustomizeResponder" {
+        return None;
+    }
+    let inner = single_generic_arg_ref(&seg.arguments)?;
+    try_peel_json_result_canonical(inner, config.result_type)
+}
+
+/// Peel `Either<L, R>` → `(T_L, T_R)` where each branch is a recognised response wrapper.
+fn try_peel_either(ty: &Type, config: &ExtractConfig<'_>) -> Option<(Box<Type>, Box<Type>)> {
     let path = type_to_path(ty)?;
     let seg = last_segment(path)?;
     if seg.ident != "Either" {
@@ -177,10 +236,10 @@ fn try_peel_either(ty: &Type) -> Option<(Box<Type>, Box<Type>)> {
     let GenericArgument::Type(right_ty) = generics[1] else {
         return None;
     };
-    let a = try_peel_json_api_result(left_ty)
-        .or_else(|| try_peel_customized_json_api_result(left_ty))?;
-    let b = try_peel_json_api_result(right_ty)
-        .or_else(|| try_peel_customized_json_api_result(right_ty))?;
+    let a = try_peel_json_result(left_ty, config)
+        .or_else(|| try_peel_customized_result(left_ty, config))?;
+    let b = try_peel_json_result(right_ty, config)
+        .or_else(|| try_peel_customized_result(right_ty, config))?;
     Some((a, b))
 }
 
