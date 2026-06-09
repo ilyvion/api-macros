@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use syn::{GenericArgument, PathArguments, Type, TypePath, TypeTuple};
+use syn::{GenericArgument, PathArguments, Type, TypePath, TypeSlice, TypeTuple};
 
 use crate::type_extract::ExtractedRole;
 
@@ -174,11 +174,14 @@ pub(crate) fn generate_api_file(
         "import type {{ {} }} from \"{endpoints_path}/{ts_name}\";",
         type_imports.join(", ")
     );
-    // result_type wraps every response; callEndpoint returns Promise<result_type<R>>.
-    let _ = writeln!(
-        out,
-        "import type {{ {result_type} }} from \"{result_path}\";"
-    );
+    // In wrapped mode, result_type wraps every response; callEndpoint returns Promise<result_type<R>>.
+    // In unwrapped mode the wrapper is absent, so no import is needed.
+    if !config.unwrapped_response {
+        let _ = writeln!(
+            out,
+            "import type {{ {result_type} }} from \"{result_path}\";"
+        );
+    }
 
     // callEndpoint only throws on network/parse failures; HTTP errors are in ApiResult.success.
     let _ = writeln!(
@@ -197,7 +200,11 @@ pub(crate) fn generate_api_file(
     if has_query {
         let _ = writeln!(out, "    query?: {ts_name}Query,");
     }
-    let _ = writeln!(out, "): Promise<{result_type}<{ts_name}Response>> {{");
+    if config.unwrapped_response {
+        let _ = writeln!(out, "): Promise<{ts_name}Response> {{");
+    } else {
+        let _ = writeln!(out, "): Promise<{result_type}<{ts_name}Response>> {{");
+    }
 
     // Explicit type parameters avoid phantom-type inference ambiguity: TypeScript cannot
     // infer Q/B/P/R from the spec value alone because EndpointSpec's type params are phantom.
@@ -263,62 +270,17 @@ pub(crate) fn rust_type_to_ts(ty: &Type, imports: &mut BTreeSet<String>) -> syn:
         // Unit tuple `()` → `null`
         Type::Tuple(TypeTuple { elems, .. }) if elems.is_empty() => Ok("null".to_owned()),
 
-        // Path types: primitives, Vec<T>, Option<T>, named types
-        Type::Path(TypePath { path, .. }) => {
-            let last = path
-                .segments
-                .last()
-                .expect("type path has at least one segment");
-            let name = last.ident.to_string();
-
-            match name.as_str() {
-                // Boolean
-                "bool" => Ok("boolean".to_owned()),
-
-                // Numeric primitives
-                "f32" | "f64" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16"
-                | "i32" | "i64" | "i128" | "isize" => Ok("number".to_owned()),
-
-                // String types
-                "String" | "str" => Ok("string".to_owned()),
-
-                // Vec<T> → Array<T>
-                "Vec" => {
-                    if let PathArguments::AngleBracketed(ab) = &last.arguments
-                        && let Some(GenericArgument::Type(inner)) = ab.args.first()
-                    {
-                        let inner_ts = rust_type_to_ts(inner, imports)?;
-                        return Ok(format!("Array<{inner_ts}>"));
-                    }
-                    Err(syn::Error::new_spanned(
-                        ty,
-                        "#[api_endpoint]: `Vec` without a type argument is not supported \
-                         in endpoint signatures",
-                    ))
-                }
-
-                // Option<T> → T | null
-                "Option" => {
-                    if let PathArguments::AngleBracketed(ab) = &last.arguments
-                        && let Some(GenericArgument::Type(inner)) = ab.args.first()
-                    {
-                        let inner_ts = rust_type_to_ts(inner, imports)?;
-                        return Ok(format!("{inner_ts} | null"));
-                    }
-                    Err(syn::Error::new_spanned(
-                        ty,
-                        "#[api_endpoint]: `Option` without a type argument is not supported \
-                         in endpoint signatures",
-                    ))
-                }
-
-                // Everything else is treated as a named type from bindings/
-                other => {
-                    imports.insert(other.to_owned());
-                    Ok(other.to_owned())
-                }
-            }
+        // Non-unit tuple `(A, B, ...)` → `[A, B, ...]`
+        Type::Tuple(TypeTuple { elems, .. }) => {
+            let elem_ts = elems
+                .iter()
+                .map(|e| rust_type_to_ts(e, imports))
+                .collect::<syn::Result<Vec<_>>>()?;
+            Ok(format!("[{}]", elem_ts.join(", ")))
         }
+
+        // Path types: primitives, Vec<T>, Option<T>, named types
+        Type::Path(tp) => path_type_to_ts(ty, tp, imports),
 
         // Fixed-size array `[T; N]` → TypeScript tuple `[T, T, ..., T]` (N elements)
         Type::Array(arr) => {
@@ -347,15 +309,146 @@ pub(crate) fn rust_type_to_ts(ty: &Type, imports: &mut BTreeSet<String>) -> syn:
             Ok(format!("[{elems}]"))
         }
 
+        // Slice `[T]` → `Array<T>`
+        Type::Slice(TypeSlice { elem, .. }) => {
+            let inner_ts = rust_type_to_ts(elem, imports)?;
+            Ok(format!("Array<{inner_ts}>"))
+        }
+
         // Reference `&T` → treat as `T`
         Type::Reference(r) => rust_type_to_ts(&r.elem, imports),
 
-        // Anything else (slices, raw pointers, non-unit tuples, impl Trait, etc.) → error
+        // Anything else (raw pointers, impl Trait, etc.) → error
         _ => Err(syn::Error::new_spanned(
             ty,
             "#[api_endpoint]: unsupported type in endpoint signature; only named types, \
-             bool, numeric primitives, String, Vec<T>, Option<T>, [T; N], () and &T are supported",
+             bool, numeric primitives, String/str/char, PathBuf/Path, Vec<T>, Option<T>, \
+             Box<T>/Rc<T>/Arc<T>, Cow<T>, HashMap/BTreeMap/IndexMap<K,V>, \
+             HashSet/BTreeSet/IndexSet<T>, [T; N], [T], (A, B, ...), () and &T are supported",
         )),
+    }
+}
+
+fn path_type_to_ts(
+    ty: &Type,
+    tp: &TypePath,
+    imports: &mut BTreeSet<String>,
+) -> syn::Result<String> {
+    let last = tp
+        .path
+        .segments
+        .last()
+        .expect("type path has at least one segment");
+    let name = last.ident.to_string();
+
+    match name.as_str() {
+        "bool" => Ok("boolean".to_owned()),
+
+        "f32" | "f64" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16"
+        | "i32" | "i64" | "i128" | "isize" => Ok("number".to_owned()),
+
+        // String types and char; also path types that serialize as strings
+        "String" | "str" | "char" | "PathBuf" | "Path" => Ok("string".to_owned()),
+
+        // Vec<T> → Array<T>
+        "Vec" => {
+            if let PathArguments::AngleBracketed(ab) = &last.arguments
+                && let Some(GenericArgument::Type(inner)) = ab.args.first()
+            {
+                let inner_ts = rust_type_to_ts(inner, imports)?;
+                return Ok(format!("Array<{inner_ts}>"));
+            }
+            Err(syn::Error::new_spanned(
+                ty,
+                "#[api_endpoint]: `Vec` without a type argument is not supported \
+                 in endpoint signatures",
+            ))
+        }
+
+        // HashMap/BTreeMap/IndexMap<K, V> → Record<K, V>
+        "HashMap" | "BTreeMap" | "IndexMap" => {
+            if let PathArguments::AngleBracketed(ab) = &last.arguments {
+                let mut type_args = ab.args.iter().filter_map(|a| {
+                    if let GenericArgument::Type(t) = a { Some(t) } else { None }
+                });
+                if let (Some(k), Some(v)) = (type_args.next(), type_args.next()) {
+                    let k_ts = rust_type_to_ts(k, imports)?;
+                    let v_ts = rust_type_to_ts(v, imports)?;
+                    return Ok(format!("Record<{k_ts}, {v_ts}>"));
+                }
+            }
+            Err(syn::Error::new_spanned(
+                ty,
+                "#[api_endpoint]: map type without two type arguments is not supported \
+                 in endpoint signatures",
+            ))
+        }
+
+        // HashSet<T> → Array<T>
+        "HashSet" | "BTreeSet" | "IndexSet" => {
+            if let PathArguments::AngleBracketed(ab) = &last.arguments
+                && let Some(GenericArgument::Type(inner)) = ab.args.first()
+            {
+                let inner_ts = rust_type_to_ts(inner, imports)?;
+                return Ok(format!("Array<{inner_ts}>"));
+            }
+            Err(syn::Error::new_spanned(
+                ty,
+                "#[api_endpoint]: set type without a type argument is not supported \
+                 in endpoint signatures",
+            ))
+        }
+
+        // Box<T>/Rc<T>/Arc<T> → T (transparent wrappers)
+        "Box" | "Rc" | "Arc" => {
+            if let PathArguments::AngleBracketed(ab) = &last.arguments
+                && let Some(GenericArgument::Type(inner)) = ab.args.first()
+            {
+                return rust_type_to_ts(inner, imports);
+            }
+            Err(syn::Error::new_spanned(
+                ty,
+                "#[api_endpoint]: pointer type without a type argument is not supported \
+                 in endpoint signatures",
+            ))
+        }
+
+        // Cow<'a, T> → T (skip the lifetime, use the type argument)
+        "Cow" => {
+            if let PathArguments::AngleBracketed(ab) = &last.arguments
+                && let Some(inner) = ab.args.iter().find_map(|a| {
+                    if let GenericArgument::Type(t) = a { Some(t) } else { None }
+                })
+            {
+                return rust_type_to_ts(inner, imports);
+            }
+            Err(syn::Error::new_spanned(
+                ty,
+                "#[api_endpoint]: `Cow` without a type argument is not supported \
+                 in endpoint signatures",
+            ))
+        }
+
+        // Option<T> → T | null
+        "Option" => {
+            if let PathArguments::AngleBracketed(ab) = &last.arguments
+                && let Some(GenericArgument::Type(inner)) = ab.args.first()
+            {
+                let inner_ts = rust_type_to_ts(inner, imports)?;
+                return Ok(format!("{inner_ts} | null"));
+            }
+            Err(syn::Error::new_spanned(
+                ty,
+                "#[api_endpoint]: `Option` without a type argument is not supported \
+                 in endpoint signatures",
+            ))
+        }
+
+        // Everything else is treated as a named type from bindings/
+        other => {
+            imports.insert(other.to_owned());
+            Ok(other.to_owned())
+        }
     }
 }
 
@@ -447,6 +540,24 @@ mod tests {
     }
 
     #[test]
+    fn ts_hashset() {
+        let mut imp = BTreeSet::new();
+        assert_eq!(
+            rust_type_to_ts(&parse_type("HashSet<u16>"), &mut imp).unwrap(),
+            "Array<number>"
+        );
+        assert!(imp.is_empty(), "HashSet<primitive> needs no imports");
+    }
+
+    #[test]
+    fn ts_hashset_named() {
+        let mut imp = BTreeSet::new();
+        let ts = rust_type_to_ts(&parse_type("HashSet<TagId>"), &mut imp).unwrap();
+        assert_eq!(ts, "Array<TagId>");
+        assert!(imp.contains("TagId"), "inner named type added to imports");
+    }
+
+    #[test]
     fn ts_option() {
         let mut imp = BTreeSet::new();
         assert_eq!(
@@ -477,20 +588,133 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn ts_slice_is_error() {
+    fn ts_slice() {
         let mut imp = BTreeSet::new();
-        assert!(
-            rust_type_to_ts(&parse_type("[u8]"), &mut imp).is_err(),
-            "slice type should not be silently accepted"
+        assert_eq!(
+            rust_type_to_ts(&parse_type("[u8]"), &mut imp).unwrap(),
+            "Array<number>"
         );
+        assert!(imp.is_empty());
     }
 
     #[test]
-    fn ts_non_unit_tuple_is_error() {
+    fn ts_slice_ref() {
         let mut imp = BTreeSet::new();
-        assert!(
-            rust_type_to_ts(&parse_type("(A, B)"), &mut imp).is_err(),
-            "non-unit tuple should not be silently accepted"
+        assert_eq!(
+            rust_type_to_ts(&parse_type("&[String]"), &mut imp).unwrap(),
+            "Array<string>"
+        );
+        assert!(imp.is_empty());
+    }
+
+    #[test]
+    fn ts_non_unit_tuple() {
+        let mut imp = BTreeSet::new();
+        assert_eq!(
+            rust_type_to_ts(&parse_type("(u32, String)"), &mut imp).unwrap(),
+            "[number, string]"
+        );
+        assert!(imp.is_empty());
+    }
+
+    #[test]
+    fn ts_tuple_named() {
+        let mut imp = BTreeSet::new();
+        let ts = rust_type_to_ts(&parse_type("(UserId, ProfileInfo)"), &mut imp).unwrap();
+        assert_eq!(ts, "[UserId, ProfileInfo]");
+        assert!(imp.contains("UserId"));
+        assert!(imp.contains("ProfileInfo"));
+    }
+
+    #[test]
+    fn ts_char() {
+        let mut imp = BTreeSet::new();
+        assert_eq!(
+            rust_type_to_ts(&parse_type("char"), &mut imp).unwrap(),
+            "string"
+        );
+        assert!(imp.is_empty());
+    }
+
+    #[test]
+    fn ts_pathbuf() {
+        for ty in &["PathBuf", "Path"] {
+            let mut imp = BTreeSet::new();
+            assert_eq!(
+                rust_type_to_ts(&parse_type(ty), &mut imp).unwrap(),
+                "string",
+                "{ty} should map to string"
+            );
+            assert!(imp.is_empty());
+        }
+    }
+
+    #[test]
+    fn ts_box() {
+        let mut imp = BTreeSet::new();
+        assert_eq!(
+            rust_type_to_ts(&parse_type("Box<u32>"), &mut imp).unwrap(),
+            "number"
+        );
+        assert!(imp.is_empty());
+    }
+
+    #[test]
+    fn ts_box_named() {
+        let mut imp = BTreeSet::new();
+        let ts = rust_type_to_ts(&parse_type("Box<UserInfo>"), &mut imp).unwrap();
+        assert_eq!(ts, "UserInfo");
+        assert!(imp.contains("UserInfo"));
+    }
+
+    #[test]
+    fn ts_rc_arc() {
+        for ty in &["Rc<String>", "Arc<String>"] {
+            let mut imp = BTreeSet::new();
+            assert_eq!(
+                rust_type_to_ts(&parse_type(ty), &mut imp).unwrap(),
+                "string",
+                "{ty} should be transparent"
+            );
+            assert!(imp.is_empty());
+        }
+    }
+
+    #[test]
+    fn ts_cow() {
+        let mut imp = BTreeSet::new();
+        assert_eq!(
+            rust_type_to_ts(&parse_type("Cow<'static, str>"), &mut imp).unwrap(),
+            "string"
+        );
+        assert!(imp.is_empty());
+    }
+
+    #[test]
+    fn ts_hashmap() {
+        let mut imp = BTreeSet::new();
+        assert_eq!(
+            rust_type_to_ts(&parse_type("HashMap<String, u32>"), &mut imp).unwrap(),
+            "Record<string, number>"
+        );
+        assert!(imp.is_empty());
+    }
+
+    #[test]
+    fn ts_hashmap_named() {
+        let mut imp = BTreeSet::new();
+        let ts = rust_type_to_ts(&parse_type("HashMap<String, UserInfo>"), &mut imp).unwrap();
+        assert_eq!(ts, "Record<string, UserInfo>");
+        assert!(imp.contains("UserInfo"));
+        assert!(!imp.contains("String"), "primitive key should not be imported");
+    }
+
+    #[test]
+    fn ts_btreemap() {
+        let mut imp = BTreeSet::new();
+        assert_eq!(
+            rust_type_to_ts(&parse_type("BTreeMap<String, bool>"), &mut imp).unwrap(),
+            "Record<string, boolean>"
         );
     }
 
@@ -932,6 +1156,56 @@ mod tests {
         assert_eq!(
             "DeleteUserWebauthnCredentialsId".to_lower_camel_case(),
             "deleteUserWebauthnCredentialsId"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // generate_api_file: unwrapped mode
+    // ------------------------------------------------------------------
+
+    fn unwrapped_config() -> crate::config::MacroConfig {
+        let mut cfg = crate::config::MacroConfig::for_tests("client/services/http");
+        cfg.unwrapped_response = true;
+        cfg
+    }
+
+    #[test]
+    fn generate_api_unwrapped_returns_raw_promise() {
+        let content = generate_api_file(
+            "GetUserInfo",
+            "getUserInfo",
+            false,
+            false,
+            false,
+            &unwrapped_config(),
+        );
+        assert!(
+            content.contains("): Promise<GetUserInfoResponse> {"),
+            "unwrapped mode uses bare Promise<R>, not Promise<ApiResult<R>>"
+        );
+        assert!(
+            !content.contains("import type { ApiResult }"),
+            "unwrapped mode must not import the result wrapper type"
+        );
+    }
+
+    #[test]
+    fn generate_api_wrapped_still_imports_result_type() {
+        let content = generate_api_file(
+            "GetUserInfo",
+            "getUserInfo",
+            false,
+            false,
+            false,
+            &default_config(),
+        );
+        assert!(
+            content.contains("): Promise<ApiResult<GetUserInfoResponse>> {"),
+            "wrapped mode keeps ApiResult in return type"
+        );
+        assert!(
+            content.contains("import type { ApiResult } from \"bindings/ApiResult\";"),
+            "wrapped mode imports the result wrapper type"
         );
     }
 

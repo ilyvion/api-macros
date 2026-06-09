@@ -127,7 +127,27 @@ If non-empty, accepted as an alias for `CustomizeResponder<Json<{APIM_RESULT_TYP
 APIM_CUSTOMIZERESPONDER_JSON_API_RESULT_ALIAS = "CustomizedJsonApiResult"
 ```
 
+### `APIM_UNWRAPPED_RESPONSE` (optional, default: `false`)
+
+When set to `1`, `true`, or `yes`, switches the macro to **unwrapped mode**. In this mode:
+
+- Handler return types must omit the `APIM_RESULT_TYPE` layer: `Result<Json<T>>` instead of
+  `Result<Json<ApiResult<T>>>`.
+- Generated TypeScript wrappers return `Promise<T>` directly instead of `Promise<ApiResult<T>>`.
+- The `APIM_RESULT_TYPE` import is omitted from generated API wrapper files entirely.
+
+```toml
+[env]
+APIM_UNWRAPPED_RESPONSE = "true"
+```
+
+This is useful when the consuming project handles API errors at a lower layer (e.g. in the
+`callEndpoint` implementation itself) and callers always receive the successful response type
+directly.
+
 ## Required export from `APIM_CALL_ENDPOINT_MODULE`
+
+### Wrapped mode (default)
 
 The module must export a function compatible with the following signature.
 `ApiResult<R>` (or whatever `APIM_RESULT_TYPE` is set to) is imported by the generated
@@ -147,6 +167,24 @@ export declare function callEndpoint<Q, B, P, R>(
 `callEndpoint` should only throw on network or parse failures. HTTP-level errors
 (non-2xx responses) must be returned inside `ApiResult` rather than thrown, so
 callers can handle them without try/catch.
+
+### Unwrapped mode (`APIM_UNWRAPPED_RESPONSE = true`)
+
+The required signature changes so the return type is the raw response type `R`:
+
+```typescript
+export declare function callEndpoint<Q, B, P, R>(
+    spec: EndpointSpec<Q, B, P, R>,
+    args?: {
+        query?: Q;
+        body?: B;
+        pathParams?: P;
+    },
+): Promise<R>;
+```
+
+In this mode, `callEndpoint` is responsible for throwing (or otherwise surfacing) HTTP errors
+itself, since there is no wrapper to carry them back to the caller.
 
 ## `EndpointSpec` and `HttpMethod`
 
@@ -213,7 +251,9 @@ The macro inspects the handler's parameter list to determine which roles are pre
 - `web::Json<T>` → request-body type (`T`)
 - `web::Path<T>` → path-parameter type (`T`)
 
-The return type must be one of:
+The return type must be one of the forms below, depending on `APIM_UNWRAPPED_RESPONSE`.
+
+**Wrapped mode (default):**
 
 - `Result<Json<ApiResult<T>>>` — standard JSON response
 - `Result<CustomizeResponder<Json<ApiResult<T>>>>` — customized JSON response
@@ -223,6 +263,12 @@ The return type must be one of:
 
 If `APIM_JSON_API_RESULT_ALIAS` or `APIM_CUSTOMIZERESPONDER_JSON_API_RESULT_ALIAS` are set,
 those names are also accepted.
+
+**Unwrapped mode (`APIM_UNWRAPPED_RESPONSE = true`):**
+
+- `Result<Json<T>>` — standard JSON response
+- `Result<CustomizeResponder<Json<T>>>` — customized JSON response
+- `Result<Either<L, R>>` where `L` and `R` are either of the above → union response `T_L | T_R`
 
 Generated API wrapper functions follow the argument order: `pathParams` first,
 then `body`, then `query` (optional). This matches the convention that required

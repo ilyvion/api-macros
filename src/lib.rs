@@ -48,6 +48,10 @@
 //!   accepted in handler return types as an alias for `Json<{APIM_RESULT_TYPE}<T>>`.
 //! - `APIM_CUSTOMIZERESPONDER_JSON_API_RESULT_ALIAS` (optional, default `""`) — if non-empty,
 //!   accepted as an alias for `CustomizeResponder<Json<{APIM_RESULT_TYPE}<T>>>`.
+//! - `APIM_UNWRAPPED_RESPONSE` (optional, default `"false"`) — when set to `1`, `true`, or
+//!   `yes`, switches to unwrapped mode: handler return types omit the `APIM_RESULT_TYPE` layer
+//!   (e.g. `Result<Json<T>>` instead of `Result<Json<ApiResult<T>>>`), and generated TypeScript
+//!   wrappers return `Promise<T>` directly instead of `Promise<ApiResult<T>>`.
 //!
 //! The generated TypeScript file contains `const` values for the method and path, and
 //! `type` aliases for the query, body, path-params, and response roles.
@@ -207,6 +211,7 @@ fn expand(args: &EndpointArgs, func: &ItemFn) -> syn::Result<proc_macro2::TokenS
         result_type: &config.result_type,
         json_alias: config.json_alias.as_deref(),
         customized_alias: config.customized_alias.as_deref(),
+        unwrapped_response: config.unwrapped_response,
     };
 
     // Extract types from the function signature.

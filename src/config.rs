@@ -26,6 +26,9 @@ pub(crate) struct MacroConfig {
     pub(crate) api_path: String,
     /// `APIM_DEPTH_DEFAULT` — default value for the `depth` macro argument (default: `1`).
     pub(crate) depth_default: usize,
+    /// `APIM_UNWRAPPED_RESPONSE` — when `true`, handlers return `Result<Json<T>>` (no wrapper)
+    /// and the generated TypeScript returns `Promise<T>` directly (default: `false`).
+    pub(crate) unwrapped_response: bool,
 }
 
 impl MacroConfig {
@@ -55,6 +58,8 @@ impl MacroConfig {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(1);
+        let unwrapped_response = std::env::var("APIM_UNWRAPPED_RESPONSE")
+            .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"));
 
         Self {
             result_type,
@@ -75,6 +80,7 @@ impl MacroConfig {
             endpoints_path,
             api_path,
             depth_default,
+            unwrapped_response,
         }
     }
 
@@ -105,6 +111,7 @@ impl MacroConfig {
             endpoints_path: "bindings/endpoints".to_owned(),
             api_path: "api".to_owned(),
             depth_default: 1,
+            unwrapped_response: false,
         }
     }
 }
