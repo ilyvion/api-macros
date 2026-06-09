@@ -1,0 +1,5 @@
+error: #[api_endpoint]: unrecognised return type; expected `JsonApiResult<T>`, `CustomizedJsonApiResult<T>`, or `Either<JsonApiResult<A>, CustomizedJsonApiResult<B>>`
+  --> tests/fixtures/fail/unrecognised_return_type.rs:12:33
+   |
+12 | async fn my_handler() -> Result<SomeRandomType> {
+   |                                 ^^^^^^^^^^^^^^

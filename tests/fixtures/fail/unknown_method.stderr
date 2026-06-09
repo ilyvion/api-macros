@@ -1,0 +1,5 @@
+error: #[api_endpoint]: unknown HTTP method `CUSTOM`; expected GET, POST, PUT, PATCH, DELETE, HEAD, or OPTIONS
+ --> tests/fixtures/fail/unknown_method.rs:7:25
+  |
+7 | #[api_endpoint(method = "CUSTOM", path = "test/path")]
+  |                         ^^^^^^^^
