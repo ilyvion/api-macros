@@ -189,7 +189,7 @@ pub(crate) fn generate_api_file(
         "import {{ {call_endpoint_name} }} from \"{call_endpoint_module}\";"
     );
 
-    // Function signature — required params first (pathParams, body), optional last (query).
+    // Function signature — required params first (pathParams, body), optional last (query, options).
     let _ = writeln!(out, "\nexport async function {fn_name}(");
     if has_path_params {
         let _ = writeln!(out, "    pathParams: {ts_name}PathParams,");
@@ -200,6 +200,7 @@ pub(crate) fn generate_api_file(
     if has_query {
         let _ = writeln!(out, "    query?: {ts_name}Query,");
     }
+    let _ = writeln!(out, "    options?: Omit<RequestInit, \"method\">,");
     if config.unwrapped_response {
         let _ = writeln!(out, "): Promise<{ts_name}Response> {{");
     } else {
@@ -241,12 +242,12 @@ pub(crate) fn generate_api_file(
     if call_args.is_empty() {
         let _ = writeln!(
             out,
-            "    return {call_endpoint_name}<{explicit_type_params}>(spec);"
+            "    return {call_endpoint_name}<{explicit_type_params}>(spec, undefined, options);"
         );
     } else {
         let _ = writeln!(
             out,
-            "    return {call_endpoint_name}<{explicit_type_params}>(spec, {{ {} }});",
+            "    return {call_endpoint_name}<{explicit_type_params}>(spec, {{ {} }}, options);",
             call_args.join(", ")
         );
     }
@@ -1063,6 +1064,10 @@ mod tests {
             "optional query parameter"
         );
         assert!(
+            content.contains("options?: Omit<RequestInit, \"method\">,"),
+            "options parameter always present"
+        );
+        assert!(
             content.contains("): Promise<ApiResult<GetUserInfoResponse>> {"),
             "return type wraps Response in ApiResult"
         );
@@ -1076,8 +1081,8 @@ mod tests {
             "explicit type params: absent roles use never, not alias names"
         );
         assert!(
-            content.contains("spec, { query }"),
-            "query arg passed to callEndpoint"
+            content.contains("spec, { query }, options"),
+            "query arg passed to callEndpoint with options"
         );
     }
 
@@ -1100,8 +1105,8 @@ mod tests {
             "no query parameter when has_query=false"
         );
         assert!(
-            content.contains("spec, { body }"),
-            "body arg passed to callEndpoint"
+            content.contains("spec, { body }, options"),
+            "body arg passed to callEndpoint with options"
         );
     }
 
@@ -1120,8 +1125,8 @@ mod tests {
             "required pathParams parameter"
         );
         assert!(
-            content.contains("spec, { pathParams }"),
-            "pathParams arg passed to callEndpoint"
+            content.contains("spec, { pathParams }, options"),
+            "pathParams arg passed to callEndpoint with options"
         );
     }
 
@@ -1138,9 +1143,9 @@ mod tests {
         assert!(!content.contains("query?:"), "no query parameter");
         assert!(!content.contains("body:"), "no body parameter");
         assert!(!content.contains("pathParams:"), "no pathParams parameter");
-        // No args object — callEndpoint called with spec only; all absent roles → never
+        // No args object — callEndpoint called with spec + undefined + options; all absent roles → never
         assert!(
-            content.contains("callEndpoint<never, never, never, PostAuthLogoutResponse>(spec);"),
+            content.contains("callEndpoint<never, never, never, PostAuthLogoutResponse>(spec, undefined, options);"),
             "no args object when no params; all roles are never"
         );
     }

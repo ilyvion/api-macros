@@ -161,12 +161,18 @@ export declare function callEndpoint<Q, B, P, R>(
         body?: B;
         pathParams?: P;
     },
+    options?: Omit<RequestInit, 'method'>,
 ): Promise<ApiResult<R>>;
 ```
 
 `callEndpoint` should only throw on network or parse failures. HTTP-level errors
 (non-2xx responses) must be returned inside `ApiResult` rather than thrown, so
 callers can handle them without try/catch.
+
+The `options` parameter is forwarded from the generated wrapper and should be
+merged with whatever `RequestInit` options the implementation applies by default
+(e.g. credentials, base URL, auth headers). Callers use it to pass per-request
+overrides such as `signal` for abort control.
 
 ### Unwrapped mode (`APIM_UNWRAPPED_RESPONSE = true`)
 
@@ -180,6 +186,7 @@ export declare function callEndpoint<Q, B, P, R>(
         body?: B;
         pathParams?: P;
     },
+    options?: Omit<RequestInit, 'method'>,
 ): Promise<R>;
 ```
 
@@ -271,5 +278,7 @@ those names are also accepted.
 - `Result<Either<L, R>>` where `L` and `R` are either of the above → union response `T_L | T_R`
 
 Generated API wrapper functions follow the argument order: `pathParams` first,
-then `body`, then `query` (optional). This matches the convention that required
-parameters precede optional ones.
+then `body`, then `query` (optional), then `options` (optional). Required
+parameters precede optional ones; `options` is always last so callers can pass
+per-request `RequestInit` overrides (e.g. `signal`) without touching the other
+arguments.
