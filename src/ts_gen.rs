@@ -48,10 +48,10 @@ pub(crate) fn generate_ts_file(
     };
 
     // TypeScript doesn't allow `import type { X }` and `export type X = X` to share the same
-    // local name. Detect the conflict: when a role alias would equal the imported type name
-    // (e.g. `export type FooBody = FooBody`), we use a re-export form instead:
-    //   `export type { FooBody } from '../FooBody';`
-    // That form creates no local binding and therefore never conflicts.
+    // local name (TS2440). Detect the conflict: when a role alias would equal the imported type
+    // name (e.g. `export type FooBody = FooBody`), keep the normal `import type { X }` (so the
+    // local binding is available to the `satisfies` block) and emit `export type { X }` (bare
+    // re-export, no `from`) instead of the alias form.
     let roles = [
         (format!("{ts_name}Query"), &query_ts),
         (format!("{ts_name}Body"), &body_ts),
@@ -61,7 +61,9 @@ pub(crate) fn generate_ts_file(
     let mut re_exports: BTreeSet<String> = BTreeSet::new();
     for (alias, ts_type) in &roles {
         if alias == ts_type.as_str() && imports.contains(ts_type.as_str()) {
-            imports.remove(ts_type.as_str());
+            // Keep the type in `imports` so `import type { X }` creates a local binding
+            // (required for the `satisfies` block). We'll emit `export type { X }` (no `from`)
+            // to re-export that binding without triggering TS2440.
             re_exports.insert((*ts_type).clone());
         }
     }
@@ -92,8 +94,10 @@ pub(crate) fn generate_ts_file(
 
     for (alias, ts_type) in &roles {
         if re_exports.contains(ts_type.as_str()) {
-            // No local binding — use re-export to avoid TS2440.
-            let _ = writeln!(out, "export type {{ {ts_type} }} from \"../{ts_type}\";");
+            // Re-export the locally-imported binding to avoid TS2440 (`export type X = X` is
+            // illegal when X is also an import). `export type { X }` is valid and keeps the
+            // local binding visible to the `satisfies` block below.
+            let _ = writeln!(out, "export type {{ {ts_type} }};");
         } else {
             let _ = writeln!(out, "export type  {alias} = {ts_type};");
         }
@@ -858,8 +862,9 @@ mod tests {
     fn generate_conflicting_alias_uses_re_export() {
         // When the body type name equals the role alias name (e.g. endpoint "PatchInfo"
         // has body type PatchInfoBody → alias PatchInfoBody), TypeScript would error with
-        // TS2440. We must emit `export type { PatchInfoBody } from '../PatchInfoBody'`
-        // instead.
+        // TS2440 if we emitted `export type PatchInfoBody = PatchInfoBody`. Instead we
+        // keep the normal `import type { PatchInfoBody }` and emit `export type { PatchInfoBody }`
+        // (bare re-export) so the local binding remains available to the `satisfies` block.
         let body = parse_type("PatchInfoBody");
         let response = ExtractedRole::Single(Box::new(parse_type("()")));
         let content = generate_ts_file(
@@ -872,15 +877,20 @@ mod tests {
             &response,
         )
         .unwrap();
-        // Re-export form: no local binding conflict
+        // The type is imported normally to create a local binding for the `satisfies` block.
         assert!(
-            content.contains("export type { PatchInfoBody } from \"../PatchInfoBody\";"),
-            "conflicting body alias uses re-export form"
+            content.contains("import type { PatchInfoBody } from \"../PatchInfoBody\";"),
+            "conflicting type must still appear as a regular import for local binding"
         );
-        // No import line for the conflicting type
+        // Re-export form (no `from`): re-exports the local binding without triggering TS2440.
         assert!(
-            !content.contains("import type { PatchInfoBody }"),
-            "conflicting type must not appear as a regular import"
+            content.contains("export type { PatchInfoBody };"),
+            "conflicting body alias uses bare re-export form"
+        );
+        // The combined re-export-from form must NOT be used (it creates no local binding).
+        assert!(
+            !content.contains("export type { PatchInfoBody } from"),
+            "combined re-export-from form must not be emitted"
         );
         // The standard type alias line must NOT be present
         assert!(
