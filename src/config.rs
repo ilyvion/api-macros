@@ -17,6 +17,14 @@ pub(crate) struct MacroConfig {
     /// `APIM_CALL_ENDPOINT_NAME` — name of the `callEndpoint` function (default: `"callEndpoint"`).
     pub(crate) call_endpoint_name: String,
     /// `APIM_RESULT_PATH` — TS module path to import `result_type` from (default: `"bindings/ApiResult"`).
+    /// Currently unread: `generate_api_file` always imports `typed_result_type` instead (see the
+    /// `TypedApiResult` doc comment in the consuming project's `http.ts`-equivalent module for
+    /// why), but `result_type` itself is still read by `type_extract` for peeling handler return
+    /// types, so this stays alongside it rather than being removed outright.
+    #[expect(
+        dead_code,
+        reason = "kept for parity with result_type; not currently read"
+    )]
     pub(crate) result_path: String,
     /// `APIM_EXPORT_DIR` — root output directory relative to `CARGO_MANIFEST_DIR` (default: `"generated"`).
     pub(crate) export_dir: String,
@@ -29,6 +37,12 @@ pub(crate) struct MacroConfig {
     /// `APIM_UNWRAPPED_RESPONSE` — when `true`, handlers return `Result<Json<T>>` (no wrapper)
     /// and the generated TypeScript returns `Promise<T>` directly (default: `false`).
     pub(crate) unwrapped_response: bool,
+    /// `APIM_TYPED_RESULT_TYPE` — name of the discriminated response-wrapper type used when
+    /// `field_errors` is set on an endpoint (default: `"TypedApiResult"`).
+    pub(crate) typed_result_type: String,
+    /// `APIM_TYPED_RESULT_PATH` — TS module path to import `typed_result_type` from
+    /// (default: `"bindings/ApiResult"`).
+    pub(crate) typed_result_path: String,
 }
 
 impl MacroConfig {
@@ -60,6 +74,10 @@ impl MacroConfig {
             .unwrap_or(1);
         let unwrapped_response = std::env::var("APIM_UNWRAPPED_RESPONSE")
             .is_ok_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"));
+        let typed_result_type =
+            std::env::var("APIM_TYPED_RESULT_TYPE").unwrap_or_else(|_| "TypedApiResult".to_owned());
+        let typed_result_path = std::env::var("APIM_TYPED_RESULT_PATH")
+            .unwrap_or_else(|_| "bindings/ApiResult".to_owned());
 
         Self {
             result_type,
@@ -81,6 +99,8 @@ impl MacroConfig {
             api_path,
             depth_default,
             unwrapped_response,
+            typed_result_type,
+            typed_result_path,
         }
     }
 
@@ -112,6 +132,8 @@ impl MacroConfig {
             api_path: "api".to_owned(),
             depth_default: 1,
             unwrapped_response: false,
+            typed_result_type: "TypedApiResult".to_owned(),
+            typed_result_path: "bindings/ApiResult".to_owned(),
         }
     }
 }

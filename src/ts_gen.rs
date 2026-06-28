@@ -15,6 +15,7 @@ use crate::type_extract::ExtractedRole;
 ///
 /// Returns the file content as a `String`, or a [`syn::Error`] if the function signature
 /// contains a type that cannot be converted to TypeScript.
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn generate_ts_file(
     ts_name: &str,
     method: &str,
@@ -23,6 +24,7 @@ pub(crate) fn generate_ts_file(
     body: Option<&Type>,
     path_params: Option<&Type>,
     response: &ExtractedRole,
+    field_errors: Option<&Type>,
 ) -> syn::Result<String> {
     let mut imports: BTreeSet<String> = BTreeSet::new();
 
@@ -46,25 +48,34 @@ pub(crate) fn generate_ts_file(
             format!("{a_ts} | {b_ts}")
         }
     };
+    let field_errors_ts = field_errors
+        .map(|t| rust_type_to_ts(t, &mut imports))
+        .transpose()?;
 
     // TypeScript doesn't allow `import type { X }` and `export type X = X` to share the same
     // local name (TS2440). Detect the conflict: when a role alias would equal the imported type
     // name (e.g. `export type FooBody = FooBody`), keep the normal `import type { X }` (so the
     // local binding is available to the `satisfies` block) and emit `export type { X }` (bare
     // re-export, no `from`) instead of the alias form.
-    let roles = [
-        (format!("{ts_name}Query"), &query_ts),
-        (format!("{ts_name}Body"), &body_ts),
-        (format!("{ts_name}PathParams"), &path_params_ts),
-        (format!("{ts_name}Response"), &response_ts),
+    let mut roles = vec![
+        (format!("{ts_name}Query"), query_ts),
+        (format!("{ts_name}Body"), body_ts),
+        (format!("{ts_name}PathParams"), path_params_ts),
+        (format!("{ts_name}Response"), response_ts),
     ];
+    // Only present when `field_errors` was given; `EndpointSpec`'s 5th type param defaults to
+    // `never`, so omitting this role entirely (rather than emitting `= never`) keeps endpoints
+    // without field errors generating byte-identical output to before this feature existed.
+    if let Some(field_errors_ts) = field_errors_ts {
+        roles.push((format!("{ts_name}FieldErrors"), field_errors_ts));
+    }
     let mut re_exports: BTreeSet<String> = BTreeSet::new();
     for (alias, ts_type) in &roles {
-        if alias == ts_type.as_str() && imports.contains(ts_type.as_str()) {
+        if alias == ts_type && imports.contains(ts_type.as_str()) {
             // Keep the type in `imports` so `import type { X }` creates a local binding
             // (required for the `satisfies` block). We'll emit `export type { X }` (no `from`)
             // to re-export that binding without triggering TS2440.
-            re_exports.insert((*ts_type).clone());
+            re_exports.insert(ts_type.clone());
         }
     }
 
@@ -106,6 +117,11 @@ pub(crate) fn generate_ts_file(
     // Typed spec object — `satisfies` validates at compile time without unsafe casting.
     // Role aliases ({ts_name}Query, {ts_name}Body, etc.) are used as the phantom type
     // params so this always compiles even when they resolve to `never`.
+    let field_errors_arg = if field_errors.is_some() {
+        format!(",\n    {ts_name}FieldErrors")
+    } else {
+        String::new()
+    };
     let _ = writeln!(
         out,
         "\nexport default {{\n    \
@@ -115,44 +131,41 @@ pub(crate) fn generate_ts_file(
              {ts_name}Query,\n    \
              {ts_name}Body,\n    \
              {ts_name}PathParams,\n    \
-             {ts_name}Response\n\
+             {ts_name}Response{field_errors_arg}\n\
          >;",
     );
 
     Ok(out)
 }
 
-/// Generate the content of `<api_path>/<TsName>.ts` — a thin typed wrapper
-/// that calls `callEndpoint` with the endpoint's spec and the appropriate arguments.
-///
-/// Parameters:
-/// - `ts_name`            — `PascalCase` endpoint name (e.g. `"GetUserInfo"`).
-/// - `fn_name`            — camelCase TypeScript function name (e.g. `"getUserInfo"`).
-/// - `has_query`          — whether the endpoint has a query-string type (not `never`).
-/// - `has_body`           — whether the endpoint has a request-body type (not `never`).
-/// - `has_path_params`    — whether the endpoint has path-parameter types (not `never`).
-/// - `config`             - the configuration values extracted from the environment:
-///   - `call_endpoint_module` — TS module path for the `callEndpoint` import.
-///   - `call_endpoint_name`   — exported name of the `callEndpoint` function.
-///   - `endpoints_path`       — TS module path prefix for endpoint binding imports.
-///   - `result_type`          — name of the response-wrapper type (e.g. `"ApiResult"`).
-///   - `result_path`          — TS module path to import `result_type` from.
-pub(crate) fn generate_api_file(
-    ts_name: &str,
-    fn_name: &str,
-    has_query: bool,
-    has_body: bool,
-    has_path_params: bool,
-    config: &crate::config::MacroConfig,
-) -> String {
-    let mut out = String::new();
-    out.push_str(
-        "// This file was generated by the api_endpoint macro. Do not edit this file manually.\n",
-    );
+/// Which optional roles an endpoint has, beyond the always-present response type.
+#[derive(Clone, Copy, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each field is an independent, named yes/no role flag; a bitflags enum would \
+              add ceremony without adding clarity here"
+)]
+pub(crate) struct ApiFileRoles {
+    /// Whether the endpoint has a query-string type (not `never`).
+    pub(crate) has_query: bool,
+    /// Whether the endpoint has a request-body type (not `never`).
+    pub(crate) has_body: bool,
+    /// Whether the endpoint has path-parameter types (not `never`).
+    pub(crate) has_path_params: bool,
+    /// Whether the endpoint declared `field_errors = "..."`.
+    pub(crate) has_field_errors: bool,
+}
 
+/// Writes the `import`/`import type` lines for `<api_path>/<TsName>.ts` into `out`, returning
+/// the response-wrapper type name to use in the function's return-type annotation (`None` in
+/// unwrapped mode, where there is no wrapper).
+fn write_api_imports(
+    out: &mut String,
+    ts_name: &str,
+    roles: ApiFileRoles,
+    config: &crate::config::MacroConfig,
+) {
     let endpoints_path = &config.endpoints_path;
-    let result_type = &config.result_type;
-    let result_path = &config.result_path;
     let call_endpoint_name = &config.call_endpoint_name;
     let call_endpoint_module = config
         .call_endpoint_module()
@@ -163,27 +176,35 @@ pub(crate) fn generate_api_file(
 
     // Type-only imports for parameter and return-type annotations.
     let mut type_imports: Vec<String> = Vec::new();
-    if has_query {
+    if roles.has_query {
         type_imports.push(format!("{ts_name}Query"));
     }
-    if has_body {
+    if roles.has_body {
         type_imports.push(format!("{ts_name}Body"));
     }
-    if has_path_params {
+    if roles.has_path_params {
         type_imports.push(format!("{ts_name}PathParams"));
     }
     type_imports.push(format!("{ts_name}Response")); // always needed for the return type
+    if roles.has_field_errors && !config.unwrapped_response {
+        type_imports.push(format!("{ts_name}FieldErrors"));
+    }
     let _ = writeln!(
         out,
         "import type {{ {} }} from \"{endpoints_path}/{ts_name}\";",
         type_imports.join(", ")
     );
-    // In wrapped mode, result_type wraps every response; callEndpoint returns Promise<result_type<R>>.
+    // In wrapped mode, every response is wrapped in `typed_result_type` (see the
+    // `TypedApiResult` doc comment for why a plain `result_type<R>` would be dishonest about
+    // what `success: false` responses actually carry, even for endpoints with no
+    // `field_errors` — its `Fe` type parameter just defaults to `never` for those).
     // In unwrapped mode the wrapper is absent, so no import is needed.
     if !config.unwrapped_response {
+        let typed_result_type = &config.typed_result_type;
+        let typed_result_path = &config.typed_result_path;
         let _ = writeln!(
             out,
-            "import type {{ {result_type} }} from \"{result_path}\";"
+            "import type {{ {typed_result_type} }} from \"{typed_result_path}\";"
         );
     }
 
@@ -192,57 +213,101 @@ pub(crate) fn generate_api_file(
         out,
         "import {{ {call_endpoint_name} }} from \"{call_endpoint_module}\";"
     );
+}
+
+/// Generate the content of `<api_path>/<TsName>.ts` — a thin typed wrapper
+/// that calls `callEndpoint` with the endpoint's spec and the appropriate arguments.
+///
+/// Parameters:
+/// - `ts_name`  — `PascalCase` endpoint name (e.g. `"GetUserInfo"`).
+/// - `fn_name`  — camelCase TypeScript function name (e.g. `"getUserInfo"`).
+/// - `roles`    — which optional roles the endpoint has (see [`ApiFileRoles`]).
+/// - `config`   - the configuration values extracted from the environment:
+///   - `call_endpoint_module` — TS module path for the `callEndpoint` import.
+///   - `call_endpoint_name`   — exported name of the `callEndpoint` function.
+///   - `endpoints_path`       — TS module path prefix for endpoint binding imports.
+///   - `result_type`          — name of the response-wrapper type (e.g. `"ApiResult"`).
+///   - `result_path`          — TS module path to import `result_type` from.
+///   - `typed_result_type`    — name of the discriminated wrapper type used when
+///     `roles.has_field_errors` is set (e.g. `"TypedApiResult"`).
+///   - `typed_result_path`    — TS module path to import `typed_result_type` from.
+pub(crate) fn generate_api_file(
+    ts_name: &str,
+    fn_name: &str,
+    roles: ApiFileRoles,
+    config: &crate::config::MacroConfig,
+) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "// This file was generated by the api_endpoint macro. Do not edit this file manually.\n",
+    );
+
+    write_api_imports(&mut out, ts_name, roles, config);
+
+    let typed_result_type = &config.typed_result_type;
+    // `Fe` for `TypedApiResult<R, Fe>`/`callEndpoint<Q, B, P, R, Fe>`: the endpoint's declared
+    // field-errors type, or bare `never` (no import needed) when it didn't declare one.
+    let field_errors_tp = if roles.has_field_errors {
+        format!("{ts_name}FieldErrors")
+    } else {
+        "never".to_owned()
+    };
 
     // Function signature — required params first (pathParams, body), optional last (query, options).
     let _ = writeln!(out, "\nexport async function {fn_name}(");
-    if has_path_params {
+    if roles.has_path_params {
         let _ = writeln!(out, "    pathParams: {ts_name}PathParams,");
     }
-    if has_body {
+    if roles.has_body {
         let _ = writeln!(out, "    body: {ts_name}Body,");
     }
-    if has_query {
+    if roles.has_query {
         let _ = writeln!(out, "    query?: {ts_name}Query,");
     }
     let _ = writeln!(out, "    options?: Omit<RequestInit, \"method\">,");
     if config.unwrapped_response {
         let _ = writeln!(out, "): Promise<{ts_name}Response> {{");
     } else {
-        let _ = writeln!(out, "): Promise<{result_type}<{ts_name}Response>> {{");
+        let _ = writeln!(
+            out,
+            "): Promise<{typed_result_type}<{ts_name}Response, {field_errors_tp}>> {{"
+        );
     }
 
     // Explicit type parameters avoid phantom-type inference ambiguity: TypeScript cannot
-    // infer Q/B/P/R from the spec value alone because EndpointSpec's type params are phantom.
-    // Use `never` directly for absent roles so we avoid importing names just for type params.
-    let query_tp = if has_query {
+    // infer Q/B/P/R/Fe from the spec value alone because EndpointSpec's type params are
+    // phantom. Use `never` directly for absent roles so we avoid importing names just for
+    // type params.
+    let query_tp = if roles.has_query {
         format!("{ts_name}Query")
     } else {
         "never".to_owned()
     };
-    let body_tp = if has_body {
+    let body_tp = if roles.has_body {
         format!("{ts_name}Body")
     } else {
         "never".to_owned()
     };
-    let path_params_tp = if has_path_params {
+    let path_params_tp = if roles.has_path_params {
         format!("{ts_name}PathParams")
     } else {
         "never".to_owned()
     };
     let explicit_type_params =
-        format!("{query_tp}, {body_tp}, {path_params_tp}, {ts_name}Response");
+        format!("{query_tp}, {body_tp}, {path_params_tp}, {ts_name}Response, {field_errors_tp}");
 
     let mut call_args: Vec<&str> = Vec::new();
-    if has_query {
+    if roles.has_query {
         call_args.push("query");
     }
-    if has_body {
+    if roles.has_body {
         call_args.push("body");
     }
-    if has_path_params {
+    if roles.has_path_params {
         call_args.push("pathParams");
     }
 
+    let call_endpoint_name = &config.call_endpoint_name;
     if call_args.is_empty() {
         let _ = writeln!(
             out,
@@ -349,8 +414,8 @@ fn path_type_to_ts(
     match name.as_str() {
         "bool" => Ok("boolean".to_owned()),
 
-        "f32" | "f64" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16"
-        | "i32" | "i64" | "i128" | "isize" => Ok("number".to_owned()),
+        "f32" | "f64" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32"
+        | "i64" | "i128" | "isize" => Ok("number".to_owned()),
 
         // String types and char; also path types that serialize as strings
         "String" | "str" | "char" | "PathBuf" | "Path" => Ok("string".to_owned()),
@@ -374,7 +439,11 @@ fn path_type_to_ts(
         "HashMap" | "BTreeMap" | "IndexMap" => {
             if let PathArguments::AngleBracketed(ab) = &last.arguments {
                 let mut type_args = ab.args.iter().filter_map(|a| {
-                    if let GenericArgument::Type(t) = a { Some(t) } else { None }
+                    if let GenericArgument::Type(t) = a {
+                        Some(t)
+                    } else {
+                        None
+                    }
                 });
                 if let (Some(k), Some(v)) = (type_args.next(), type_args.next()) {
                     let k_ts = rust_type_to_ts(k, imports)?;
@@ -422,7 +491,11 @@ fn path_type_to_ts(
         "Cow" => {
             if let PathArguments::AngleBracketed(ab) = &last.arguments
                 && let Some(inner) = ab.args.iter().find_map(|a| {
-                    if let GenericArgument::Type(t) = a { Some(t) } else { None }
+                    if let GenericArgument::Type(t) = a {
+                        Some(t)
+                    } else {
+                        None
+                    }
                 })
             {
                 return rust_type_to_ts(inner, imports);
@@ -711,7 +784,10 @@ mod tests {
         let ts = rust_type_to_ts(&parse_type("HashMap<String, UserInfo>"), &mut imp).unwrap();
         assert_eq!(ts, "Record<string, UserInfo>");
         assert!(imp.contains("UserInfo"));
-        assert!(!imp.contains("String"), "primitive key should not be imported");
+        assert!(
+            !imp.contains("String"),
+            "primitive key should not be imported"
+        );
     }
 
     #[test]
@@ -788,6 +864,7 @@ mod tests {
             None,
             None,
             &response,
+            None,
         )
         .unwrap();
         assert!(
@@ -842,6 +919,7 @@ mod tests {
             Some(&body),
             None,
             &response,
+            None,
         )
         .unwrap();
         assert!(content.contains("export const LoginMethod = \"POST\" as const;"));
@@ -875,6 +953,7 @@ mod tests {
             Some(&body),
             None,
             &response,
+            None,
         )
         .unwrap();
         // The type is imported normally to create a local binding for the `satisfies` block.
@@ -915,6 +994,7 @@ mod tests {
             None,
             Some(&path_params),
             &response,
+            None,
         )
         .unwrap();
         assert!(
@@ -938,8 +1018,17 @@ mod tests {
         // After the macro peels CustomizedJsonApiResult<T>, ts_gen only sees T.
         // So this verifies the Single(T) path with a non-conflicting name.
         let response = ExtractedRole::Single(Box::new(parse_type("UserEntry")));
-        let content =
-            generate_ts_file("PatchUser", "PATCH", "users", None, None, None, &response).unwrap();
+        let content = generate_ts_file(
+            "PatchUser",
+            "PATCH",
+            "users",
+            None,
+            None,
+            None,
+            &response,
+            None,
+        )
+        .unwrap();
         assert!(content.contains("export type  PatchUserResponse = UserEntry;"));
     }
 
@@ -959,6 +1048,7 @@ mod tests {
             None,
             None,
             &response,
+            None,
         )
         .unwrap();
         assert!(content.contains("export type  TestUnionResponse = TypeA | TypeB;"));
@@ -981,6 +1071,7 @@ mod tests {
             None,
             None,
             &response,
+            None,
         )
         .unwrap();
         assert!(
@@ -1013,6 +1104,7 @@ mod tests {
             Some(&body),
             None,
             &response,
+            None,
         )
         .unwrap();
         assert!(
@@ -1030,6 +1122,72 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // generate_ts_file: field_errors argument
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn generate_ts_file_with_field_errors_adds_role_and_spec_arg() {
+        let body = parse_type("CredentialsBody");
+        let response = ExtractedRole::Single(Box::new(parse_type("ExpiresIn")));
+        let field_errors = parse_type("CredentialsBodyFieldInvalidity");
+        let content = generate_ts_file(
+            "PostAuthLogin",
+            "POST",
+            "auth/login",
+            None,
+            Some(&body),
+            None,
+            &response,
+            Some(&field_errors),
+        )
+        .unwrap();
+        assert!(
+            content.contains(
+                "export type  PostAuthLoginFieldErrors = CredentialsBodyFieldInvalidity;"
+            ),
+            "field-errors role alias"
+        );
+        assert!(
+            content.contains(
+                "import type { CredentialsBodyFieldInvalidity } from \"../CredentialsBodyFieldInvalidity\";"
+            ),
+            "field-errors type import"
+        );
+        assert!(
+            content.contains(
+                "satisfies EndpointSpec<\n    PostAuthLoginQuery,\n    PostAuthLoginBody,\n    PostAuthLoginPathParams,\n    PostAuthLoginResponse,\n    PostAuthLoginFieldErrors\n>;"
+            ),
+            "5-argument EndpointSpec instantiation when field_errors is set"
+        );
+    }
+
+    #[test]
+    fn generate_ts_file_without_field_errors_omits_role_and_spec_arg() {
+        // Regression guard: omitting `field_errors` must keep emitting the original
+        // 4-argument `EndpointSpec<...>` form (relying on `Fe`'s `never` default),
+        // not `= never` of the role alias.
+        let response = ExtractedRole::Single(Box::new(parse_type("ExpiresIn")));
+        let content = generate_ts_file(
+            "PostAuthLogout",
+            "POST",
+            "auth/logout",
+            None,
+            None,
+            None,
+            &response,
+            None,
+        )
+        .unwrap();
+        assert!(!content.contains("FieldErrors"));
+        assert!(
+            content.contains(
+                "satisfies EndpointSpec<\n    PostAuthLogoutQuery,\n    PostAuthLogoutBody,\n    PostAuthLogoutPathParams,\n    PostAuthLogoutResponse\n>;"
+            ),
+            "4-argument EndpointSpec instantiation when field_errors is absent"
+        );
+    }
+
+    // ------------------------------------------------------------------
     // generate_api_file
     // ------------------------------------------------------------------
 
@@ -1042,9 +1200,12 @@ mod tests {
         let content = generate_api_file(
             "GetUserInfo",
             "getUserInfo",
-            true,
-            false,
-            false,
+            ApiFileRoles {
+                has_query: true,
+                has_body: false,
+                has_path_params: false,
+                has_field_errors: false,
+            },
             &default_config(),
         );
         assert!(
@@ -1078,16 +1239,18 @@ mod tests {
             "options parameter always present"
         );
         assert!(
-            content.contains("): Promise<ApiResult<GetUserInfoResponse>> {"),
-            "return type wraps Response in ApiResult"
+            content.contains("): Promise<TypedApiResult<GetUserInfoResponse, never>> {"),
+            "return type wraps Response in TypedApiResult"
         );
         assert!(
-            content.contains("import type { ApiResult } from \"bindings/ApiResult\";"),
-            "ApiResult imported from bindings"
+            content.contains("import type { TypedApiResult } from \"bindings/ApiResult\";"),
+            "TypedApiResult imported from bindings"
         );
         // Absent roles use `never` directly in type params (not the alias name) so no extra import needed.
         assert!(
-            content.contains("callEndpoint<GetUserInfoQuery, never, never, GetUserInfoResponse>"),
+            content.contains(
+                "callEndpoint<GetUserInfoQuery, never, never, GetUserInfoResponse, never>"
+            ),
             "explicit type params: absent roles use never, not alias names"
         );
         assert!(
@@ -1101,9 +1264,12 @@ mod tests {
         let content = generate_api_file(
             "PostAuthLogin",
             "postAuthLogin",
-            false,
-            true,
-            false,
+            ApiFileRoles {
+                has_query: false,
+                has_body: true,
+                has_path_params: false,
+                has_field_errors: false,
+            },
             &default_config(),
         );
         assert!(
@@ -1125,9 +1291,12 @@ mod tests {
         let content = generate_api_file(
             "DeleteUserWebauthnCredentialsId",
             "deleteUserWebauthnCredentialsId",
-            false,
-            false,
-            true,
+            ApiFileRoles {
+                has_query: false,
+                has_body: false,
+                has_path_params: true,
+                has_field_errors: false,
+            },
             &default_config(),
         );
         assert!(
@@ -1145,9 +1314,12 @@ mod tests {
         let content = generate_api_file(
             "PostAuthLogout",
             "postAuthLogout",
-            false,
-            false,
-            false,
+            ApiFileRoles {
+                has_query: false,
+                has_body: false,
+                has_path_params: false,
+                has_field_errors: false,
+            },
             &default_config(),
         );
         assert!(!content.contains("query?:"), "no query parameter");
@@ -1155,7 +1327,7 @@ mod tests {
         assert!(!content.contains("pathParams:"), "no pathParams parameter");
         // No args object — callEndpoint called with spec + undefined + options; all absent roles → never
         assert!(
-            content.contains("callEndpoint<never, never, never, PostAuthLogoutResponse>(spec, undefined, options);"),
+            content.contains("callEndpoint<never, never, never, PostAuthLogoutResponse, never>(spec, undefined, options);"),
             "no args object when no params; all roles are never"
         );
     }
@@ -1189,9 +1361,12 @@ mod tests {
         let content = generate_api_file(
             "GetUserInfo",
             "getUserInfo",
-            false,
-            false,
-            false,
+            ApiFileRoles {
+                has_query: false,
+                has_body: false,
+                has_path_params: false,
+                has_field_errors: false,
+            },
             &unwrapped_config(),
         );
         assert!(
@@ -1209,18 +1384,61 @@ mod tests {
         let content = generate_api_file(
             "GetUserInfo",
             "getUserInfo",
-            false,
-            false,
-            false,
+            ApiFileRoles {
+                has_query: false,
+                has_body: false,
+                has_path_params: false,
+                has_field_errors: false,
+            },
             &default_config(),
         );
         assert!(
-            content.contains("): Promise<ApiResult<GetUserInfoResponse>> {"),
-            "wrapped mode keeps ApiResult in return type"
+            content.contains("): Promise<TypedApiResult<GetUserInfoResponse, never>> {"),
+            "wrapped mode keeps TypedApiResult in return type, with Fe defaulting to never"
         );
         assert!(
-            content.contains("import type { ApiResult } from \"bindings/ApiResult\";"),
+            content.contains("import type { TypedApiResult } from \"bindings/ApiResult\";"),
             "wrapped mode imports the result wrapper type"
+        );
+    }
+
+    #[test]
+    fn generate_api_with_field_errors_uses_typed_result() {
+        let content = generate_api_file(
+            "PostAuthLogin",
+            "postAuthLogin",
+            ApiFileRoles {
+                has_query: false,
+                has_body: true,
+                has_path_params: false,
+                has_field_errors: true,
+            },
+            &default_config(),
+        );
+        assert!(
+            content.contains("import type { PostAuthLoginFieldErrors }")
+                || content.contains(", PostAuthLoginFieldErrors }"),
+            "field-errors type imported from the endpoint binding file"
+        );
+        assert!(
+            content.contains("import type { TypedApiResult } from \"bindings/ApiResult\";"),
+            "TypedApiResult imported instead of ApiResult when field_errors is set"
+        );
+        assert!(
+            !content.contains("import type { ApiResult }"),
+            "plain ApiResult must not be imported when field_errors is set"
+        );
+        assert!(
+            content.contains(
+                "): Promise<TypedApiResult<PostAuthLoginResponse, PostAuthLoginFieldErrors>> {"
+            ),
+            "return type uses TypedApiResult<R, Fe>"
+        );
+        assert!(
+            content.contains(
+                "callEndpoint<never, PostAuthLoginBody, never, PostAuthLoginResponse, PostAuthLoginFieldErrors>"
+            ),
+            "explicit type params include the 5th Fe argument"
         );
     }
 
@@ -1241,6 +1459,7 @@ mod tests {
             Some(&body),
             None,
             &response,
+            None,
         )
         .unwrap();
         let import_lines: Vec<&str> = content

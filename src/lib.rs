@@ -87,6 +87,11 @@ use type_extract::{ExtractedRole, extract_types, is_unit};
 ///   `"user/info"` → `"info"` inside a `/user` scope); `depth = 2` strips two for doubly-nested
 ///   scopes. The full `path` argument is always used in the generated TypeScript path constant,
 ///   regardless of `depth`.
+/// - `field_errors` — name of a Rust type describing the per-message field tag carried on
+///   `success: false` responses (optional). When set, the generated TypeScript exports a
+///   `{Name}FieldErrors` alias for it and the API wrapper's response type becomes
+///   `TypedApiResult<{Name}Response, {Name}FieldErrors>` instead of `{Name}Response`'s plain
+///   result wrapper.
 ///
 /// # Generated items
 /// 1. The handler function annotated with actix-web's route macro (e.g. `#[actix_web::get("…")]`),
@@ -233,6 +238,20 @@ fn expand(args: &EndpointArgs, func: &ItemFn) -> syn::Result<proc_macro2::TokenS
     let body_ty = extracted.body.as_deref();
     let path_params_ty = extracted.path_params.as_deref();
 
+    // Parse the optional `field_errors = "EnumName"` argument into a concrete type.
+    let field_errors_ty = args
+        .field_errors
+        .as_ref()
+        .map(|lit| {
+            syn::parse_str::<syn::Type>(&lit.value()).map_err(|e| {
+                syn::Error::new(
+                    lit.span(),
+                    format!("#[api_endpoint]: `field_errors` is not a valid type name: {e}"),
+                )
+            })
+        })
+        .transpose()?;
+
     // Validate: if the response is a union, both branches must differ (sanity check only).
     if let ExtractedRole::Union(a, b) = &extracted.response
         && is_unit(a)
@@ -254,15 +273,19 @@ fn expand(args: &EndpointArgs, func: &ItemFn) -> syn::Result<proc_macro2::TokenS
         body_ty,
         path_params_ty,
         &extracted.response,
+        field_errors_ty.as_ref(),
     )?;
 
     // Build the API wrapper content (thin callEndpoint wrapper).
     let api_content = ts_gen::generate_api_file(
         &ts_name,
         &api_fn_name,
-        extracted.query.is_some(),
-        extracted.body.is_some(),
-        extracted.path_params.is_some(),
+        ts_gen::ApiFileRoles {
+            has_query: extracted.query.is_some(),
+            has_body: extracted.body.is_some(),
+            has_path_params: extracted.path_params.is_some(),
+            has_field_errors: field_errors_ty.is_some(),
+        },
         &config,
     );
 

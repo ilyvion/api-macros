@@ -433,8 +433,7 @@ mod tests {
 
     #[test]
     fn unwrapped_customized_json_t_extracts_inner() {
-        let sig =
-            parse_sig("async fn h() -> Result<CustomizeResponder<Json<UserInfo>>> {}");
+        let sig = parse_sig("async fn h() -> Result<CustomizeResponder<Json<UserInfo>>> {}");
         let extracted = extract_types(&sig, &unwrapped_config()).unwrap();
         let ExtractedRole::Single(ty) = extracted.response else {
             panic!("expected Single");
@@ -444,8 +443,7 @@ mod tests {
 
     #[test]
     fn unwrapped_either_extracts_union() {
-        let sig =
-            parse_sig("async fn h() -> Result<Either<Json<TypeA>, Json<TypeB>>> {}");
+        let sig = parse_sig("async fn h() -> Result<Either<Json<TypeA>, Json<TypeB>>> {}");
         let extracted = extract_types(&sig, &unwrapped_config()).unwrap();
         let ExtractedRole::Union(a, b) = extracted.response else {
             panic!("expected Union");

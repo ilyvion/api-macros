@@ -20,6 +20,11 @@ pub(crate) struct EndpointArgs {
     /// Defaults to `1`, which strips one segment (e.g. `"user/info"` → `"info"` inside a
     /// `/user` scope). Set higher for handlers registered under nested scopes.
     pub(crate) depth: Option<LitInt>,
+    /// Optional name of a Rust type (e.g. `"MyFieldErrorEnum"`) describing the per-message
+    /// field tag emitted on `success: false` responses. When set, the generated TypeScript
+    /// binding exports a `{Name}FieldErrors` alias for it and includes it as the response
+    /// wrapper's field-errors type parameter.
+    pub(crate) field_errors: Option<LitStr>,
 }
 
 impl Parse for EndpointArgs {
@@ -28,6 +33,7 @@ impl Parse for EndpointArgs {
         let mut path: Option<LitStr> = None;
         let mut name: Option<LitStr> = None;
         let mut depth: Option<LitInt> = None;
+        let mut field_errors: Option<LitStr> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -38,12 +44,13 @@ impl Parse for EndpointArgs {
                 "path" => path = Some(parse_str_lit(input, &key)?),
                 "name" => name = Some(parse_str_lit(input, &key)?),
                 "depth" => depth = Some(parse_int_lit(input, &key)?),
+                "field_errors" => field_errors = Some(parse_str_lit(input, &key)?),
                 other => {
                     return Err(syn::Error::new_spanned(
                         &key,
                         format!(
                             "unknown api_endpoint argument `{other}`; \
-                             expected `method`, `path`, `name`, or `depth`"
+                             expected `method`, `path`, `name`, `depth`, or `field_errors`"
                         ),
                     ));
                 }
@@ -69,6 +76,7 @@ impl Parse for EndpointArgs {
             path,
             name,
             depth,
+            field_errors,
         })
     }
 }
