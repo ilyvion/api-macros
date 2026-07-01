@@ -43,6 +43,10 @@ pub(crate) struct MacroConfig {
     /// `APIM_TYPED_RESULT_PATH` — TS module path to import `typed_result_type` from
     /// (default: `"bindings/ApiResult"`).
     pub(crate) typed_result_path: String,
+    /// `APIM_MODELS_PATH` — relative TS module path used as the parent
+    /// directory when importing model types referenced by an endpoint's
+    /// query/body/path-params/response roles (default: `".."`).
+    pub(crate) models_path: String,
 }
 
 impl MacroConfig {
@@ -78,6 +82,7 @@ impl MacroConfig {
             std::env::var("APIM_TYPED_RESULT_TYPE").unwrap_or_else(|_| "TypedApiResult".to_owned());
         let typed_result_path = std::env::var("APIM_TYPED_RESULT_PATH")
             .unwrap_or_else(|_| "bindings/ApiResult".to_owned());
+        let models_path = std::env::var("APIM_MODELS_PATH").unwrap_or_else(|_| "..".to_owned());
 
         Self {
             result_type,
@@ -101,6 +106,7 @@ impl MacroConfig {
             unwrapped_response,
             typed_result_type,
             typed_result_path,
+            models_path,
         }
     }
 
@@ -134,6 +140,7 @@ impl MacroConfig {
             unwrapped_response: false,
             typed_result_type: "TypedApiResult".to_owned(),
             typed_result_path: "bindings/ApiResult".to_owned(),
+            models_path: "../".to_owned(),
         }
     }
 }

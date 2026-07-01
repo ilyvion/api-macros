@@ -25,6 +25,7 @@ pub(crate) fn generate_ts_file(
     path_params: Option<&Type>,
     response: &ExtractedRole,
     field_errors: Option<&Type>,
+    models_path: &str,
 ) -> syn::Result<String> {
     let mut imports: BTreeSet<String> = BTreeSet::new();
 
@@ -87,7 +88,10 @@ pub(crate) fn generate_ts_file(
     if !imports.is_empty() {
         out.push('\n');
         for import in &imports {
-            let _ = writeln!(out, "import type {{ {import} }} from \"../{import}\";");
+            let _ = writeln!(
+                out,
+                "import type {{ {import} }} from \"{models_path}/{import}\";"
+            );
         }
     }
     // EndpointSpec is a phantom-typed descriptor; the type definition lives in EndpointSpec.ts,
@@ -865,6 +869,7 @@ mod tests {
             None,
             &response,
             None,
+            "..",
         )
         .unwrap();
         assert!(
@@ -902,6 +907,36 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // generate_ts_file: custom models_path prefix (APIM_MODELS_PATH)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn generate_uses_custom_models_path() {
+        let query = parse_type("FilterQuery");
+        let response = ExtractedRole::Single(Box::new(parse_type("ProfileResponse")));
+        let content = generate_ts_file(
+            "GetUsersProfile",
+            "GET",
+            "users/profile",
+            Some(&query),
+            None,
+            None,
+            &response,
+            None,
+            "../models",
+        )
+        .unwrap();
+        assert!(
+            content.contains("import type { FilterQuery } from \"../models/FilterQuery\";"),
+            "query import uses custom models_path"
+        );
+        assert!(
+            content.contains("import type { ProfileResponse } from \"../models/ProfileResponse\";"),
+            "response import uses custom models_path"
+        );
+    }
+
+    // ------------------------------------------------------------------
     // generate_ts_file: case 2 — POST with body type (non-conflicting names)
     // ------------------------------------------------------------------
 
@@ -920,6 +955,7 @@ mod tests {
             None,
             &response,
             None,
+            "..",
         )
         .unwrap();
         assert!(content.contains("export const LoginMethod = \"POST\" as const;"));
@@ -954,6 +990,7 @@ mod tests {
             None,
             &response,
             None,
+            "..",
         )
         .unwrap();
         // The type is imported normally to create a local binding for the `satisfies` block.
@@ -995,6 +1032,7 @@ mod tests {
             Some(&path_params),
             &response,
             None,
+            "..",
         )
         .unwrap();
         assert!(
@@ -1027,6 +1065,7 @@ mod tests {
             None,
             &response,
             None,
+            "..",
         )
         .unwrap();
         assert!(content.contains("export type  PatchUserResponse = UserEntry;"));
@@ -1049,6 +1088,7 @@ mod tests {
             None,
             &response,
             None,
+            "..",
         )
         .unwrap();
         assert!(content.contains("export type  TestUnionResponse = TypeA | TypeB;"));
@@ -1072,6 +1112,7 @@ mod tests {
             None,
             &response,
             None,
+            "..",
         )
         .unwrap();
         assert!(
@@ -1105,6 +1146,7 @@ mod tests {
             None,
             &response,
             None,
+            "..",
         )
         .unwrap();
         assert!(
@@ -1139,6 +1181,7 @@ mod tests {
             None,
             &response,
             Some(&field_errors),
+            "..",
         )
         .unwrap();
         assert!(
@@ -1176,6 +1219,7 @@ mod tests {
             None,
             &response,
             None,
+            "..",
         )
         .unwrap();
         assert!(!content.contains("FieldErrors"));
@@ -1460,6 +1504,7 @@ mod tests {
             None,
             &response,
             None,
+            "..",
         )
         .unwrap();
         let import_lines: Vec<&str> = content

@@ -52,6 +52,9 @@
 //!   `yes`, switches to unwrapped mode: handler return types omit the `APIM_RESULT_TYPE` layer
 //!   (e.g. `Result<Json<T>>` instead of `Result<Json<ApiResult<T>>>`), and generated TypeScript
 //!   wrappers return `Promise<T>` directly instead of `Promise<ApiResult<T>>`.
+//! - `APIM_MODELS_PATH` (optional, default `".."`) — relative TS module path
+//!   used as the parent directory when importing model types referenced by an endpoint's
+//!   query/body/path-params/response roles (e.g. `import type { Foo } from "{APIM_MODELS_PATH}/Foo"`).
 //!
 //! The generated TypeScript file contains `const` values for the method and path, and
 //! `type` aliases for the query, body, path-params, and response roles.
@@ -274,6 +277,7 @@ fn expand(args: &EndpointArgs, func: &ItemFn) -> syn::Result<proc_macro2::TokenS
         path_params_ty,
         &extracted.response,
         field_errors_ty.as_ref(),
+        &config.models_path,
     )?;
 
     // Build the API wrapper content (thin callEndpoint wrapper).

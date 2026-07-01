@@ -107,6 +107,18 @@ Useful when all (or most) handlers in a project share the same scope nesting lev
 APIM_DEPTH_DEFAULT = "2"
 ```
 
+### `APIM_MODELS_PATH` (optional, default: `..`)
+
+Relative TypeScript module path used as the parent directory when
+importing model types referenced by an endpoint's query/body/path-params/response roles
+(e.g. `import type { Foo } from "{APIM_MODELS_PATH}/Foo"`). Change this if model files don't
+live one directory above the generated endpoint binding files:
+
+```toml
+[env]
+APIM_MODELS_PATH = "../models"
+```
+
 ### `APIM_JSON_API_RESULT_ALIAS` (optional, default: `""`)
 
 If non-empty, this type name is accepted in handler return types as an alias for
