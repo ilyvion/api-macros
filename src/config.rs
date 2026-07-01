@@ -140,7 +140,39 @@ impl MacroConfig {
             unwrapped_response: false,
             typed_result_type: "TypedApiResult".to_owned(),
             typed_result_path: "bindings/ApiResult".to_owned(),
-            models_path: "../".to_owned(),
+            models_path: "..".to_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// `apim_env_var_list.txt` is the single source of truth for which `APIM_*` vars exist;
+    /// `build.rs` registers each with `cargo:rerun-if-env-changed` so Cargo rebuilds this
+    /// crate (and, transitively, consumers) when one changes. This test guards against
+    /// `from_env` reading a var that was never added to the list.
+    #[test]
+    fn from_env_only_reads_listed_apim_vars() {
+        let list = include_str!("../apim_env_var_list.txt");
+        let config_src = include_str!("config.rs");
+
+        for var in list.lines() {
+            assert!(
+                config_src.contains(var),
+                "`{var}` is listed in apim_env_var_list.txt but never read in config.rs"
+            );
+        }
+
+        for var in config_src
+            .split("std::env::var(\"")
+            .skip(1)
+            .filter_map(|s| s.split('"').next())
+        {
+            assert!(
+                list.lines().any(|listed| listed == var),
+                "`{var}` is read via std::env::var in config.rs but missing from \
+                 apim_env_var_list.txt, so build.rs won't rerun-if-env-changed on it"
+            );
         }
     }
 }
