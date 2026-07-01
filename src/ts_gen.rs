@@ -160,6 +160,36 @@ pub(crate) struct ApiFileRoles {
     pub(crate) has_field_errors: bool,
 }
 
+/// Computes the relative TS module path from the directory `from` to the directory `to`,
+/// where both are given relative to the same root (e.g. `APIM_EXPORT_DIR`). Used so that
+/// generated files can import each other by filesystem-relative path.
+///
+/// Examples (from -> to => result): `"api" -> "bindings/endpoints"` => `"../bindings/endpoints"`;
+/// `"api" -> "endpoints"` => `"../endpoints"`; `"api" -> "api"` => `"."`.
+fn relative_module_dir(from: &str, to: &str) -> String {
+    let from_segments: Vec<&str> = from.split('/').filter(|s| !s.is_empty()).collect();
+    let to_segments: Vec<&str> = to.split('/').filter(|s| !s.is_empty()).collect();
+
+    let common_len = from_segments
+        .iter()
+        .zip(to_segments.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let ups = from_segments.len() - common_len;
+    let mut parts: Vec<&str> = Vec::new();
+    parts.extend(std::iter::repeat_n("..", ups));
+    parts.extend(&to_segments[common_len..]);
+
+    if parts.is_empty() {
+        ".".to_owned()
+    } else if parts[0] == ".." {
+        parts.join("/")
+    } else {
+        format!("./{}", parts.join("/"))
+    }
+}
+
 /// Writes the `import`/`import type` lines for `<api_path>/<TsName>.ts` into `out`, returning
 /// the response-wrapper type name to use in the function's return-type annotation (`None` in
 /// unwrapped mode, where there is no wrapper).
@@ -169,7 +199,7 @@ fn write_api_imports(
     roles: ApiFileRoles,
     config: &crate::config::MacroConfig,
 ) {
-    let endpoints_path = &config.endpoints_path;
+    let endpoints_path = relative_module_dir(&config.api_path, &config.endpoints_path);
     let call_endpoint_name = &config.call_endpoint_name;
     let call_endpoint_module = config
         .call_endpoint_module()
@@ -229,7 +259,8 @@ fn write_api_imports(
 /// - `config`   - the configuration values extracted from the environment:
 ///   - `call_endpoint_module` — TS module path for the `callEndpoint` import.
 ///   - `call_endpoint_name`   — exported name of the `callEndpoint` function.
-///   - `endpoints_path`       — TS module path prefix for endpoint binding imports.
+///   - `endpoints_path`       — sub-path (relative to `export_dir`) where endpoint binding
+///     files live; the spec import is computed relative to `api_path` from this.
 ///   - `result_type`          — name of the response-wrapper type (e.g. `"ApiResult"`).
 ///   - `result_path`          — TS module path to import `result_type` from.
 ///   - `typed_result_type`    — name of the discriminated wrapper type used when
@@ -1232,11 +1263,80 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // relative_module_dir
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn relative_module_dir_sibling_dirs() {
+        assert_eq!(relative_module_dir("api", "endpoints"), "../endpoints");
+    }
+
+    #[test]
+    fn relative_module_dir_deeper_nesting() {
+        assert_eq!(
+            relative_module_dir("api", "bindings/endpoints"),
+            "../bindings/endpoints"
+        );
+    }
+
+    #[test]
+    fn relative_module_dir_shared_ancestor() {
+        assert_eq!(
+            relative_module_dir("v1/api", "v1/endpoints"),
+            "../endpoints"
+        );
+    }
+
+    #[test]
+    fn relative_module_dir_same_directory() {
+        assert_eq!(relative_module_dir("api", "api"), ".");
+    }
+
+    #[test]
+    fn relative_module_dir_subdirectory() {
+        assert_eq!(relative_module_dir("api", "api/endpoints"), "./endpoints");
+    }
+
+    // ------------------------------------------------------------------
     // generate_api_file
     // ------------------------------------------------------------------
 
     fn default_config() -> crate::config::MacroConfig {
         crate::config::MacroConfig::for_tests("client/services/http")
+    }
+
+    #[test]
+    fn generate_api_import_is_relative_for_sibling_dirs() {
+        // Regression test: APIM_EXPORT_DIR="bindings", APIM_ENDPOINTS_PATH="endpoints",
+        // APIM_API_PATH="api" puts endpoints/ and api/ as sibling directories under bindings/.
+        // The spec import must be filesystem-relative (`../endpoints/...`), not a bare
+        // specifier (`endpoints/...`) that only resolves via a bundler baseUrl/alias.
+        let mut config = default_config();
+        config.export_dir = "bindings".to_owned();
+        config.endpoints_path = "endpoints".to_owned();
+        config.api_path = "api".to_owned();
+
+        let content = generate_api_file(
+            "GetLogComic",
+            "getLogComic",
+            ApiFileRoles {
+                has_query: false,
+                has_body: false,
+                has_path_params: false,
+                has_field_errors: false,
+            },
+            &config,
+        );
+
+        assert!(
+            content.contains("import spec from \"../endpoints/GetLogComic\";"),
+            "spec import is relative, not a bare specifier: {content}"
+        );
+        assert!(
+            content
+                .contains("import type { GetLogComicResponse } from \"../endpoints/GetLogComic\";"),
+            "type import is relative, not a bare specifier: {content}"
+        );
     }
 
     #[test]
@@ -1253,8 +1353,8 @@ mod tests {
             &default_config(),
         );
         assert!(
-            content.contains("import spec from \"bindings/endpoints/GetUserInfo\";"),
-            "default spec import"
+            content.contains("import spec from \"../bindings/endpoints/GetUserInfo\";"),
+            "spec import is relative to the api file's own directory"
         );
         assert!(
             content.contains("import type { GetUserInfoQuery, GetUserInfoResponse }"),

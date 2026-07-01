@@ -29,6 +29,9 @@ pub(crate) struct MacroConfig {
     /// `APIM_EXPORT_DIR` — root output directory relative to `CARGO_MANIFEST_DIR` (default: `"generated"`).
     pub(crate) export_dir: String,
     /// `APIM_ENDPOINTS_PATH` — sub-path under `export_dir` for endpoint binding files (default: `"bindings/endpoints"`).
+    /// The generated API wrapper's spec import is computed as a filesystem-relative path from
+    /// `api_path` to this, so no assumption is made about the consumer's module resolution
+    /// (baseUrl/paths aliases).
     pub(crate) endpoints_path: String,
     /// `APIM_API_PATH` — sub-path under `export_dir` for API wrapper files (default: `"api"`).
     pub(crate) api_path: String,

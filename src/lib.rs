@@ -38,8 +38,7 @@
 //! - `APIM_EXPORT_DIR` (optional, default `"generated"`) — root directory for all generated
 //!   output files, relative to `CARGO_MANIFEST_DIR`.
 //! - `APIM_ENDPOINTS_PATH` (optional, default `"bindings/endpoints"`) — sub-path under
-//!   `APIM_EXPORT_DIR` for endpoint binding files, and the TS module path prefix used when
-//!   importing spec files in the generated API wrappers.
+//!   `APIM_EXPORT_DIR` for endpoint binding files.
 //! - `APIM_API_PATH` (optional, default `"api"`) — sub-path under `APIM_EXPORT_DIR` for
 //!   generated API wrapper files.
 //! - `APIM_DEPTH_DEFAULT` (optional, default `1`) — default value for the `depth` macro

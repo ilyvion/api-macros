@@ -80,8 +80,9 @@ APIM_EXPORT_DIR = "frontend/src/generated"
 
 ### `APIM_ENDPOINTS_PATH` (optional, default: `bindings/endpoints`)
 
-Sub-path under `APIM_EXPORT_DIR` where endpoint binding files are written. Also used as the
-TypeScript module path prefix when the generated API wrappers import spec files:
+Sub-path under `APIM_EXPORT_DIR` where endpoint binding files are written. The generated API
+wrapper imports its spec file using a filesystem-relative path computed from `APIM_API_PATH`
+to this path:
 
 ```toml
 [env]
